@@ -1,5 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
+const https = require('https');
+const http = require('http');
 
 // ── Config ──
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -27,6 +29,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('🤖 Fansly FYP Bot is running...');
 
+// ── Helpers ──
 async function getPeople() {
   const { data } = await supabase.from('people').select('*').order('id');
   return data || [];
@@ -94,6 +97,82 @@ async function forwardToTopic(fromMessageId, toTopicId) {
   }
 }
 
+// ── Download a file as buffer ──
+function downloadBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith('https') ? https : http;
+    proto.get(url, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// ── Extract thumbnail from Telegram video and save to Supabase ──
+async function saveThumbnail(msg, videoId, researchNum) {
+  try {
+    let fileId = null;
+
+    // Try video thumbnail first
+    if (msg.video?.thumb?.file_id) {
+      fileId = msg.video.thumb.file_id;
+    } else if (msg.video?.thumbnail?.file_id) {
+      fileId = msg.video.thumbnail.file_id;
+    } else if (msg.document?.thumb?.file_id) {
+      fileId = msg.document.thumb.file_id;
+    } else if (msg.document?.thumbnail?.file_id) {
+      fileId = msg.document.thumbnail.file_id;
+    }
+
+    if (!fileId) {
+      console.log('No thumbnail available for this video');
+      return null;
+    }
+
+    // Get file path from Telegram
+    const file = await bot.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+
+    // Download the thumbnail
+    const buffer = await downloadBuffer(fileUrl);
+
+    // Upload to Supabase storage
+    const fileName = `research_${researchNum}_${Date.now()}.jpg`;
+    const { error } = await supabase.storage
+      .from('thumbnails')
+      .upload(fileName, buffer, {
+        contentType: 'image/jpeg',
+        upsert: true
+      });
+
+    if (error) {
+      console.error('Supabase storage error:', error);
+      return null;
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('thumbnails')
+      .getPublicUrl(fileName);
+
+    const publicUrl = urlData.publicUrl;
+
+    // Save thumbnail URL to videos table
+    await supabase.from('videos')
+      .update({ thumbnail: publicUrl })
+      .eq('id', videoId);
+
+    console.log(`✅ Thumbnail saved for Research #${researchNum}: ${publicUrl}`);
+    return publicUrl;
+
+  } catch (e) {
+    console.error('Thumbnail save error:', e.message);
+    return null;
+  }
+}
+
 // ── AUTO-TAG videos posted in Research topic ──
 bot.on('message', async (msg) => {
   if (String(msg.chat.id) !== String(GROUP_CHAT_ID)) return;
@@ -114,10 +193,15 @@ bot.on('message', async (msg) => {
       );
     }
 
+    // Save message tag
     await saveMessageTag(msg.message_id, nextNum, video.id);
 
+    // Extract and save thumbnail automatically
+    const thumbUrl = await saveThumbnail(msg, video.id, nextNum);
+    const thumbStatus = thumbUrl ? '🖼 Thumbnail saved to app ✅' : '🖼 No thumbnail available';
+
     bot.sendMessage(GROUP_CHAT_ID,
-      `📹 *Tagged as Research #${nextNum}*\n\nTo send to models:\n\`/send #${nextNum} lola josie\`\nTo send to all:\n\`/send #${nextNum} all\`\nTo forward + send:\n\`/forward #${nextNum} all\``,
+      `📹 *Tagged as Research #${nextNum}*\n${thumbStatus}\n\nTo send to models:\n\`/send #${nextNum} lola josie\`\nTo send to all:\n\`/send #${nextNum} all\`\nTo forward + send:\n\`/forward #${nextNum} all\``,
       { message_thread_id: TOPICS.research, reply_to_message_id: msg.message_id, parse_mode: 'Markdown' }
     );
   } catch (e) {
@@ -215,7 +299,12 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   if (!video) return bot.sendMessage(chatId, `❌ Research #${num} not found`, { message_thread_id: threadId });
 
   await saveMessageTag(msg.reply_to_message.message_id, num, video.id);
-  bot.sendMessage(chatId, `✅ Retagged as *Research #${num}* (${video.name})`, { message_thread_id: threadId, parse_mode: 'Markdown' });
+
+  // Also re-save thumbnail
+  const thumbUrl = await saveThumbnail(msg.reply_to_message, video.id, num);
+  const thumbStatus = thumbUrl ? '🖼 Thumbnail updated ✅' : '';
+
+  bot.sendMessage(chatId, `✅ Retagged as *Research #${num}* (${video.name})\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
 // ── /list modelname ──
@@ -261,7 +350,7 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
-    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nJust forward/upload a video to Research topic — bot auto-tags it!\n\n/send #N model1 model2\n_Mark as sent (no forwarding)_\nExample: \`/send #5 lola grace\`\nExample: \`/send #5 all\`\n\n/forward #N model1 model2\n_Forward video + mark sent_\nExample: \`/forward #5 all\`\n\n/unsend #N model1\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign number_\n\n/list modelname\n_Videos sent to a model_\n\n/status\n_Overall stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia`,
+    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nJust forward/upload a video to Research topic — bot auto-tags it + saves thumbnail to app!\n\n/send #N model1 model2\n_Mark as sent (no forwarding)_\nExample: \`/send #5 lola grace\`\nExample: \`/send #5 all\`\n\n/forward #N model1 model2\n_Forward video to model topics + mark sent_\nExample: \`/forward #5 all\`\n\n/unsend #N model1\n_Mark as unsent_\nExample: \`/unsend #5 lola\`\n\n/retag #N\n_Reply to video to reassign number + update thumbnail_\n\n/list modelname\n_Videos sent to a model_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 });
