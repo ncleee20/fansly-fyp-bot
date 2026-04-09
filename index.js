@@ -97,7 +97,6 @@ async function forwardToTopic(fromMessageId, toTopicId) {
   }
 }
 
-// ── Download a file as buffer ──
 function downloadBuffer(url) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
@@ -110,67 +109,108 @@ function downloadBuffer(url) {
   });
 }
 
-// ── Extract thumbnail from Telegram video and save to Supabase ──
 async function saveThumbnail(msg, videoId, researchNum) {
   try {
     let fileId = null;
+    if (msg.video?.thumb?.file_id) fileId = msg.video.thumb.file_id;
+    else if (msg.video?.thumbnail?.file_id) fileId = msg.video.thumbnail.file_id;
+    else if (msg.document?.thumb?.file_id) fileId = msg.document.thumb.file_id;
+    else if (msg.document?.thumbnail?.file_id) fileId = msg.document.thumbnail.file_id;
+    if (!fileId) return null;
 
-    // Try video thumbnail first
-    if (msg.video?.thumb?.file_id) {
-      fileId = msg.video.thumb.file_id;
-    } else if (msg.video?.thumbnail?.file_id) {
-      fileId = msg.video.thumbnail.file_id;
-    } else if (msg.document?.thumb?.file_id) {
-      fileId = msg.document.thumb.file_id;
-    } else if (msg.document?.thumbnail?.file_id) {
-      fileId = msg.document.thumbnail.file_id;
-    }
-
-    if (!fileId) {
-      console.log('No thumbnail available for this video');
-      return null;
-    }
-
-    // Get file path from Telegram
     const file = await bot.getFile(fileId);
     const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-
-    // Download the thumbnail
     const buffer = await downloadBuffer(fileUrl);
-
-    // Upload to Supabase storage
     const fileName = `research_${researchNum}_${Date.now()}.jpg`;
-    const { error } = await supabase.storage
-      .from('thumbnails')
-      .upload(fileName, buffer, {
-        contentType: 'image/jpeg',
-        upsert: true
-      });
 
-    if (error) {
-      console.error('Supabase storage error:', error);
-      return null;
-    }
+    const { error } = await supabase.storage.from('thumbnails').upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
+    if (error) { console.error('Storage error:', error); return null; }
 
-    // Get public URL
-    const { data: urlData } = supabase.storage
-      .from('thumbnails')
-      .getPublicUrl(fileName);
-
-    const publicUrl = urlData.publicUrl;
-
-    // Save thumbnail URL to videos table
-    await supabase.from('videos')
-      .update({ thumbnail: publicUrl })
-      .eq('id', videoId);
-
-    console.log(`✅ Thumbnail saved for Research #${researchNum}: ${publicUrl}`);
-    return publicUrl;
-
+    const { data: urlData } = supabase.storage.from('thumbnails').getPublicUrl(fileName);
+    await supabase.from('videos').update({ thumbnail: urlData.publicUrl }).eq('id', videoId);
+    console.log(`✅ Thumbnail saved for Research #${researchNum}`);
+    return urlData.publicUrl;
   } catch (e) {
-    console.error('Thumbnail save error:', e.message);
+    console.error('Thumbnail error:', e.message);
     return null;
   }
+}
+
+// ── SUPABASE REALTIME: Watch sent_status for toggle changes ──
+async function startRealtimeListener() {
+  console.log('👂 Starting Supabase Realtime listener...');
+
+  const channel = supabase
+    .channel('sent_status_changes')
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'sent_status',
+      filter: 'is_sent=eq.true'
+    }, async (payload) => {
+      try {
+        const { video_id, person_id } = payload.new;
+        console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
+
+        // Get video and person details
+        const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
+        const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
+
+        if (!video || !person) {
+          console.error('Could not find video or person');
+          return;
+        }
+
+        // Get the tagged message for this video
+        const { data: tag } = await supabase
+          .from('message_tags')
+          .select('message_id')
+          .eq('video_id', video_id)
+          .single();
+
+        if (!tag) {
+          console.log(`⚠️ No tagged message found for ${video.name} — video not uploaded to Research topic yet`);
+          // Send notification to Research topic
+          bot.sendMessage(GROUP_CHAT_ID,
+            `⚠️ *Toggle detected for ${video.name} → ${person.name}*\n\nBut this video hasn't been uploaded to the Research topic yet!\nPlease upload it first so the bot can forward it.`,
+            { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        // Get model's topic ID
+        const modelKey = person.name.toLowerCase();
+        const topicId = TOPICS[modelKey];
+
+        if (!topicId) {
+          console.error(`No topic ID found for model: ${person.name}`);
+          return;
+        }
+
+        // Forward the video to the model's topic
+        console.log(`📤 Forwarding ${video.name} to ${person.name}'s topic...`);
+        const success = await forwardToTopic(tag.message_id, topicId);
+
+        if (success) {
+          console.log(`✅ Successfully forwarded ${video.name} to ${person.name}`);
+          // Send confirmation to Research topic
+          bot.sendMessage(GROUP_CHAT_ID,
+            `✅ *Auto-forwarded*\n${video.name} → ${person.name}`,
+            { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
+          );
+        } else {
+          console.error(`❌ Failed to forward ${video.name} to ${person.name}`);
+        }
+
+      } catch (e) {
+        console.error('Realtime handler error:', e);
+      }
+    })
+    .subscribe((status) => {
+      console.log(`Realtime subscription status: ${status}`);
+    });
+
+  return channel;
 }
 
 // ── AUTO-TAG videos posted in Research topic ──
@@ -193,15 +233,12 @@ bot.on('message', async (msg) => {
       );
     }
 
-    // Save message tag
     await saveMessageTag(msg.message_id, nextNum, video.id);
-
-    // Extract and save thumbnail automatically
     const thumbUrl = await saveThumbnail(msg, video.id, nextNum);
-    const thumbStatus = thumbUrl ? '🖼 Thumbnail saved to app ✅' : '🖼 No thumbnail available';
+    const thumbStatus = thumbUrl ? '🖼 Thumbnail saved ✅' : '🖼 No thumbnail available';
 
     bot.sendMessage(GROUP_CHAT_ID,
-      `📹 *Tagged as Research #${nextNum}*\n${thumbStatus}\n\nTo send to models:\n\`/send #${nextNum} lola josie\`\nTo send to all:\n\`/send #${nextNum} all\`\nTo forward + send:\n\`/forward #${nextNum} all\``,
+      `📹 *Tagged as Research #${nextNum}*\n${thumbStatus}\n\nToggle in the app to send to models — bot will forward automatically!`,
       { message_thread_id: TOPICS.research, reply_to_message_id: msg.message_id, parse_mode: 'Markdown' }
     );
   } catch (e) {
@@ -214,7 +251,7 @@ bot.onText(/\/send (.+)/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
-  if (args.length < 2) return bot.sendMessage(chatId, '❌ Usage: /send #N modelname\nExample: /send #5 lola\nExample: /send #5 all', { message_thread_id: threadId });
+  if (args.length < 2) return bot.sendMessage(chatId, '❌ Usage: /send #N modelname or /send #N all', { message_thread_id: threadId });
 
   const video = await findVideo(args[0]);
   if (!video) return bot.sendMessage(chatId, `❌ Could not find video: "${args[0]}"`, { message_thread_id: threadId });
@@ -273,7 +310,7 @@ bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   if (args.length < 2) return bot.sendMessage(chatId, '❌ Usage: /unsend #N modelname', { message_thread_id: threadId });
 
   const video = await findVideo(args[0]);
-  if (!video) return bot.sendMessage(chatId, `❌ Could not find video: "${args[0]}"`, { message_thread_id: threadId });
+  if (!video) return bot.sendMessage(chatId, `❌ Could not find: "${args[0]}"`, { message_thread_id: threadId });
 
   const modelNames = args.slice(1).includes('all') ? MODEL_NAMES : args.slice(1);
   let results = [];
@@ -288,7 +325,7 @@ bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, results.join('\n'), { message_thread_id: threadId });
 });
 
-// ── /retag #N (reply to a video to reassign its number) ──
+// ── /retag #N ──
 bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
@@ -299,8 +336,6 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   if (!video) return bot.sendMessage(chatId, `❌ Research #${num} not found`, { message_thread_id: threadId });
 
   await saveMessageTag(msg.reply_to_message.message_id, num, video.id);
-
-  // Also re-save thumbnail
   const thumbUrl = await saveThumbnail(msg.reply_to_message, video.id, num);
   const thumbStatus = thumbUrl ? '🖼 Thumbnail updated ✅' : '';
 
@@ -350,7 +385,14 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
-    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nJust forward/upload a video to Research topic — bot auto-tags it + saves thumbnail to app!\n\n/send #N model1 model2\n_Mark as sent (no forwarding)_\nExample: \`/send #5 lola grace\`\nExample: \`/send #5 all\`\n\n/forward #N model1 model2\n_Forward video to model topics + mark sent_\nExample: \`/forward #5 all\`\n\n/unsend #N model1\n_Mark as unsent_\nExample: \`/unsend #5 lola\`\n\n/retag #N\n_Reply to video to reassign number + update thumbnail_\n\n/list modelname\n_Videos sent to a model_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia`,
+    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it automatically\n\n*Auto-forwarding:*\nToggle in web app → bot forwards to model topic automatically\n\n/forward #N model1 ... | all\n_Manually forward video to model topics_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign number_\n\n/list modelname\n_Videos sent to a model_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
+});
+
+// ── Start Realtime listener ──
+startRealtimeListener().then(() => {
+  console.log('✅ Realtime listener started');
+}).catch(e => {
+  console.error('❌ Failed to start Realtime listener:', e);
 });
