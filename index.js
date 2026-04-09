@@ -3,13 +3,11 @@ const { createClient } = require('@supabase/supabase-js');
 const https = require('https');
 const http = require('http');
 
-// ── Config ──
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
 
-// ── Topic IDs ──
 const TOPICS = {
   research: 3,
   lola: 4,
@@ -23,13 +21,11 @@ const TOPICS = {
 
 const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'grace', 'mia'];
 
-// ── Init ──
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('🤖 Fansly FYP Bot is running...');
 
-// ── Helpers ──
 async function getPeople() {
   const { data } = await supabase.from('people').select('*').order('id');
   return data || [];
@@ -128,7 +124,6 @@ async function saveThumbnail(msg, videoId, researchNum) {
 
     const { data: urlData } = supabase.storage.from('thumbnails').getPublicUrl(fileName);
     await supabase.from('videos').update({ thumbnail: urlData.publicUrl }).eq('id', videoId);
-    console.log(`✅ Thumbnail saved for Research #${researchNum}`);
     return urlData.publicUrl;
   } catch (e) {
     console.error('Thumbnail error:', e.message);
@@ -136,11 +131,51 @@ async function saveThumbnail(msg, videoId, researchNum) {
   }
 }
 
+// ── Get next available Fansly number for a model ──
+async function getNextFanslyNum(personId) {
+  const { data } = await supabase
+    .from('sent_status')
+    .select('fansly_num')
+    .eq('person_id', personId)
+    .eq('is_sent', true)
+    .not('fansly_num', 'is', null)
+    .order('fansly_num', { ascending: false })
+    .limit(1);
+  if (data && data.length > 0) return data[0].fansly_num + 1;
+  return 1;
+}
+
+// ── Set fansly_num for a specific sent_status row ──
+async function setFanslyNum(videoId, personId, fanslyNum) {
+  await supabase
+    .from('sent_status')
+    .update({ fansly_num: fanslyNum })
+    .eq('video_id', videoId)
+    .eq('person_id', personId);
+}
+
+// ── Auto-assign fansly_num when toggled ──
+async function autoAssignFanslyNum(videoId, personId) {
+  // Check if already has a fansly_num
+  const { data } = await supabase
+    .from('sent_status')
+    .select('fansly_num')
+    .eq('video_id', videoId)
+    .eq('person_id', personId)
+    .single();
+
+  if (data?.fansly_num) return data.fansly_num; // Already assigned
+
+  const nextNum = await getNextFanslyNum(personId);
+  await setFanslyNum(videoId, personId, nextNum);
+  return nextNum;
+}
+
 // ── SUPABASE REALTIME: Watch sent_status for toggle changes ──
 async function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
 
-  const channel = supabase
+  supabase
     .channel('sent_status_changes')
     .on('postgres_changes', {
       event: 'UPDATE',
@@ -152,16 +187,13 @@ async function startRealtimeListener() {
         const { video_id, person_id } = payload.new;
         console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
 
-        // Get video and person details
         const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
         const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
+        if (!video || !person) return;
 
-        if (!video || !person) {
-          console.error('Could not find video or person');
-          return;
-        }
+        // Auto-assign fansly_num
+        const fanslyNum = await autoAssignFanslyNum(video_id, person_id);
 
-        // Get the tagged message for this video
         const { data: tag } = await supabase
           .from('message_tags')
           .select('message_id')
@@ -169,48 +201,33 @@ async function startRealtimeListener() {
           .single();
 
         if (!tag) {
-          console.log(`⚠️ No tagged message found for ${video.name} — video not uploaded to Research topic yet`);
-          // Send notification to Research topic
           bot.sendMessage(GROUP_CHAT_ID,
-            `⚠️ *Toggle detected for ${video.name} → ${person.name}*\n\nBut this video hasn't been uploaded to the Research topic yet!\nPlease upload it first so the bot can forward it.`,
+            `⚠️ *Toggle detected for ${video.name} → ${person.name}*\nBut this video hasn't been uploaded to the Research topic yet!`,
             { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
           );
           return;
         }
 
-        // Get model's topic ID
         const modelKey = person.name.toLowerCase();
         const topicId = TOPICS[modelKey];
+        if (!topicId) return;
 
-        if (!topicId) {
-          console.error(`No topic ID found for model: ${person.name}`);
-          return;
-        }
-
-        // Forward the video to the model's topic
-        console.log(`📤 Forwarding ${video.name} to ${person.name}'s topic...`);
         const success = await forwardToTopic(tag.message_id, topicId);
 
         if (success) {
-          console.log(`✅ Successfully forwarded ${video.name} to ${person.name}`);
-          // Send confirmation to Research topic
+          console.log(`✅ Forwarded ${video.name} to ${person.name} as Fansly #${fanslyNum}`);
           bot.sendMessage(GROUP_CHAT_ID,
-            `✅ *Auto-forwarded*\n${video.name} → ${person.name}`,
+            `✅ *Auto-forwarded*\n${video.name} → ${person.name}\n_Assigned as Fansly #${fanslyNum} for ${person.name}_\n\nTo override: go to ${person.name}'s topic and reply to the video with \`/map #N\``,
             { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
           );
-        } else {
-          console.error(`❌ Failed to forward ${video.name} to ${person.name}`);
         }
-
       } catch (e) {
         console.error('Realtime handler error:', e);
       }
     })
     .subscribe((status) => {
-      console.log(`Realtime subscription status: ${status}`);
+      console.log(`Realtime status: ${status}`);
     });
-
-  return channel;
 }
 
 // ── AUTO-TAG videos posted in Research topic ──
@@ -238,12 +255,86 @@ bot.on('message', async (msg) => {
     const thumbStatus = thumbUrl ? '🖼 Thumbnail saved ✅' : '🖼 No thumbnail available';
 
     bot.sendMessage(GROUP_CHAT_ID,
-      `📹 *Tagged as Research #${nextNum}*\n${thumbStatus}\n\nToggle in the app to send to models — bot will forward automatically!`,
+      `📹 *Tagged as Research #${nextNum}*\n${thumbStatus}\n\nToggle in the app to auto-forward to models!`,
       { message_thread_id: TOPICS.research, reply_to_message_id: msg.message_id, parse_mode: 'Markdown' }
     );
   } catch (e) {
     console.error('Auto-tag error:', e);
   }
+});
+
+// ── /map #N — reply to a forwarded video in a model's topic to assign Fansly number ──
+bot.onText(/\/map (#?\d+)/i, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const threadId = msg.message_thread_id;
+
+  if (!msg.reply_to_message) {
+    return bot.sendMessage(chatId,
+      '❌ Reply to a video in a model\'s topic and use /map #N\nExample: /map #79',
+      { message_thread_id: threadId }
+    );
+  }
+
+  const fanslyNum = parseInt(match[1].replace('#', ''));
+
+  // Figure out which model topic this is
+  const modelEntry = Object.entries(TOPICS).find(([name, id]) => id === threadId && name !== 'research');
+  if (!modelEntry) {
+    return bot.sendMessage(chatId,
+      '❌ This command only works in model topics (not in Research)',
+      { message_thread_id: threadId }
+    );
+  }
+
+  const modelName = modelEntry[0];
+  const person = await findPerson(modelName);
+  if (!person) return bot.sendMessage(chatId, `❌ Could not find model: ${modelName}`, { message_thread_id: threadId });
+
+  // Find which video this message belongs to via message_tags
+  // The forwarded message in the model topic was forwarded FROM the research topic
+  // We need to find the original message_id
+  const forwardedFrom = msg.reply_to_message.forward_from_message_id || msg.reply_to_message.forward_from?.id;
+
+  // Try to find by the original message ID
+  let tag = null;
+  if (forwardedFrom) {
+    const { data } = await supabase
+      .from('message_tags')
+      .select('*, videos(*)')
+      .eq('message_id', forwardedFrom)
+      .single();
+    tag = data;
+  }
+
+  // If not found by forward, search all tags and find by person's sent_status
+  if (!tag) {
+    const { data: sentRows } = await supabase
+      .from('sent_status')
+      .select('*, videos(*)')
+      .eq('person_id', person.id)
+      .eq('is_sent', true)
+      .is('fansly_num', null)
+      .order('video_id', { ascending: false })
+      .limit(1);
+
+    if (sentRows && sentRows.length > 0) {
+      tag = { video_id: sentRows[0].video_id, videos: sentRows[0].videos };
+    }
+  }
+
+  if (!tag) {
+    return bot.sendMessage(chatId,
+      `❌ Could not find the research video for this message. Make sure the video was sent via the bot.`,
+      { message_thread_id: threadId }
+    );
+  }
+
+  await setFanslyNum(tag.video_id || tag.id, person.id, fanslyNum);
+
+  bot.sendMessage(chatId,
+    `✅ *Mapped!*\n${tag.videos?.name || 'Video'} → *Fansly #${fanslyNum}* for ${person.name}\n\nThis will show as Fansly #${fanslyNum} in ${person.name}'s tab in the app.`,
+    { message_thread_id: threadId, parse_mode: 'Markdown' }
+  );
 });
 
 // ── /send #N model1 model2 ... | all ──
@@ -264,7 +355,8 @@ bot.onText(/\/send (.+)/i, async (msg, match) => {
     const person = await findPerson(modelName);
     if (!person) { results.push(`❌ Not found: ${modelName}`); continue; }
     await markSent(video.id, person.id, true);
-    results.push(`✅ ${video.name} → ${person.name}`);
+    const fanslyNum = await autoAssignFanslyNum(video.id, person.id);
+    results.push(`✅ ${video.name} → ${person.name} (Fansly #${fanslyNum})`);
   }
 
   bot.sendMessage(chatId, `📤 *Send Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
@@ -280,7 +372,7 @@ bot.onText(/\/forward (.+)/i, async (msg, match) => {
   if (!video) return bot.sendMessage(chatId, `❌ Could not find video: "${args[0]}"`, { message_thread_id: threadId });
 
   const { data: tagData } = await supabase.from('message_tags').select('message_id').eq('video_id', video.id).single();
-  if (!tagData) return bot.sendMessage(chatId, `❌ No tagged message for ${video.name}. Upload to Research topic first.`, { message_thread_id: threadId });
+  if (!tagData) return bot.sendMessage(chatId, `❌ No tagged message for ${video.name}.`, { message_thread_id: threadId });
 
   const modelNames = args.slice(1).includes('all') ? MODEL_NAMES : args.slice(1);
   let results = [];
@@ -293,7 +385,8 @@ bot.onText(/\/forward (.+)/i, async (msg, match) => {
     const forwarded = await forwardToTopic(tagData.message_id, topicId);
     if (forwarded) {
       await markSent(video.id, person.id, true);
-      results.push(`✅ ${video.name} → ${person.name}`);
+      const fanslyNum = await autoAssignFanslyNum(video.id, person.id);
+      results.push(`✅ ${video.name} → ${person.name} (Fansly #${fanslyNum})`);
     } else {
       results.push(`❌ Failed to forward to ${modelName}`);
     }
@@ -339,7 +432,7 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   const thumbUrl = await saveThumbnail(msg.reply_to_message, video.id, num);
   const thumbStatus = thumbUrl ? '🖼 Thumbnail updated ✅' : '';
 
-  bot.sendMessage(chatId, `✅ Retagged as *Research #${num}* (${video.name})\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
+  bot.sendMessage(chatId, `✅ Retagged as *Research #${num}*\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
 // ── /list modelname ──
@@ -350,14 +443,24 @@ bot.onText(/\/list (.+)/i, async (msg, match) => {
   if (!person) return bot.sendMessage(chatId, `❌ Unknown model: ${match[1]}`, { message_thread_id: threadId });
 
   const videos = await getSortedVideos();
-  const { data: sentData } = await supabase.from('sent_status').select('*').eq('person_id', person.id).eq('is_sent', true);
-  const sentVideoIds = sentData?.map(s => s.video_id) || [];
-  const sentVideos = videos.filter(v => sentVideoIds.includes(v.id));
+  const { data: sentData } = await supabase
+    .from('sent_status')
+    .select('*, videos(*)')
+    .eq('person_id', person.id)
+    .eq('is_sent', true)
+    .order('fansly_num', { ascending: true });
 
-  if (!sentVideos.length) return bot.sendMessage(chatId, `📭 No videos sent to ${person.name} yet.`, { message_thread_id: threadId });
+  if (!sentData?.length) return bot.sendMessage(chatId, `📭 No videos sent to ${person.name} yet.`, { message_thread_id: threadId });
 
-  const list = sentVideos.map((v, i) => `${i + 1}. Fansly Video ${i + 1} _(${v.name})_`).join('\n');
-  bot.sendMessage(chatId, `📋 *${person.name}'s Videos* (${sentVideos.length} total)\n\n${list}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
+  const list = sentData.map(s => {
+    const fNum = s.fansly_num ? `Fansly #${s.fansly_num}` : 'Fansly # pending';
+    return `• ${fNum} _(${s.videos?.name || 'Unknown'})_`;
+  }).join('\n');
+
+  bot.sendMessage(chatId,
+    `📋 *${person.name}'s Videos* (${sentData.length} total)\n\n${list}`,
+    { message_thread_id: threadId, parse_mode: 'Markdown' }
+  );
 });
 
 // ── /status ──
@@ -377,7 +480,10 @@ bot.onText(/\/status/, async (msg) => {
     const filled = Math.round(ps / videos.length * 10);
     modelStats += `\n${'█'.repeat(filled)}${'░'.repeat(10 - filled)} *${person.name}*: ${ps}/${videos.length}`;
   }
-  bot.sendMessage(chatId, `📊 *Fansly FYP Tracker Status*\n\n🎬 Research Videos: ${videos.length}\n👥 Models: ${people.length}\n✅ Sent: ${sent}/${total} (${pct}%)\n\n*Per Model:*${modelStats}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
+  bot.sendMessage(chatId,
+    `📊 *Fansly FYP Tracker Status*\n\n🎬 Research Videos: ${videos.length}\n👥 Models: ${people.length}\n✅ Sent: ${sent}/${total} (${pct}%)\n\n*Per Model:*${modelStats}`,
+    { message_thread_id: threadId, parse_mode: 'Markdown' }
+  );
 });
 
 // ── /help ──
@@ -385,7 +491,7 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
-    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it automatically\n\n*Auto-forwarding:*\nToggle in web app → bot forwards to model topic automatically\n\n/forward #N model1 ... | all\n_Manually forward video to model topics_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign number_\n\n/list modelname\n_Videos sent to a model_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia`,
+    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/map #N\n_Reply to video in model topic to set Fansly #_\nExample: \`/map #79\`\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 });
@@ -394,5 +500,5 @@ bot.onText(/\/help/, (msg) => {
 startRealtimeListener().then(() => {
   console.log('✅ Realtime listener started');
 }).catch(e => {
-  console.error('❌ Failed to start Realtime listener:', e);
+  console.error('❌ Realtime listener failed:', e);
 });
