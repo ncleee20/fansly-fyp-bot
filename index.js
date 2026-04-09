@@ -298,25 +298,21 @@ bot.on('message', async (msg) => {
   }
 });
 
-// ── /map #N — reply to a forwarded video in a model's topic to assign Fansly number ──
-bot.onText(/\/map (#?\d+)/i, async (msg, match) => {
+// ── /map #researchN #fanslyN — map research number to fansly number for this model's topic ──
+// Usage: /map #5 #85  (Research #5 = Fansly #85 for this model)
+// Can be typed anywhere in the model's topic — no need to reply to video
+bot.onText(/\/map (#?\d+)\s+(#?\d+)/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
 
-  if (!msg.reply_to_message) {
-    return bot.sendMessage(chatId,
-      '❌ Reply to a video in a model\'s topic and use /map #N\nExample: /map #79',
-      { message_thread_id: threadId }
-    );
-  }
-
-  const fanslyNum = parseInt(match[1].replace('#', ''));
+  const researchNum = parseInt(match[1].replace('#', ''));
+  const fanslyNum = parseInt(match[2].replace('#', ''));
 
   // Figure out which model topic this is
   const modelEntry = Object.entries(TOPICS).find(([name, id]) => id === threadId && name !== 'research');
   if (!modelEntry) {
     return bot.sendMessage(chatId,
-      '❌ This command only works in model topics (not in Research)',
+      '❌ This command only works in model topics\nUsage: /map #researchN #fanslyN\nExample: /map #5 #85',
       { message_thread_id: threadId }
     );
   }
@@ -325,49 +321,19 @@ bot.onText(/\/map (#?\d+)/i, async (msg, match) => {
   const person = await findPerson(modelName);
   if (!person) return bot.sendMessage(chatId, `❌ Could not find model: ${modelName}`, { message_thread_id: threadId });
 
-  // Find which video this message belongs to via message_tags
-  // The forwarded message in the model topic was forwarded FROM the research topic
-  // We need to find the original message_id
-  const forwardedFrom = msg.reply_to_message.forward_from_message_id || msg.reply_to_message.forward_from?.id;
-
-  // Try to find by the original message ID
-  let tag = null;
-  if (forwardedFrom) {
-    const { data } = await supabase
-      .from('message_tags')
-      .select('*, videos(*)')
-      .eq('message_id', forwardedFrom)
-      .single();
-    tag = data;
-  }
-
-  // If not found by forward, search all tags and find by person's sent_status
-  if (!tag) {
-    const { data: sentRows } = await supabase
-      .from('sent_status')
-      .select('*, videos(*)')
-      .eq('person_id', person.id)
-      .eq('is_sent', true)
-      .is('fansly_num', null)
-      .order('video_id', { ascending: false })
-      .limit(1);
-
-    if (sentRows && sentRows.length > 0) {
-      tag = { video_id: sentRows[0].video_id, videos: sentRows[0].videos };
-    }
-  }
-
-  if (!tag) {
+  // Find the video by research number
+  const video = await findVideo(String(researchNum));
+  if (!video) {
     return bot.sendMessage(chatId,
-      `❌ Could not find the research video for this message. Make sure the video was sent via the bot.`,
+      `❌ Research #${researchNum} not found in database`,
       { message_thread_id: threadId }
     );
   }
 
-  await setFanslyNum(tag.video_id || tag.id, person.id, fanslyNum);
+  await setFanslyNum(video.id, person.id, fanslyNum);
 
   bot.sendMessage(chatId,
-    `✅ *Mapped!*\n${tag.videos?.name || 'Video'} → *Fansly #${fanslyNum}* for ${person.name}\n\nThis will show as Fansly #${fanslyNum} in ${person.name}'s tab in the app.`,
+    `✅ *Mapped!*\nResearch #${researchNum} → *Fansly #${fanslyNum}* for ${person.name}\n\nShows as Fansly #${fanslyNum} in ${person.name}'s tab in the app.`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 });
