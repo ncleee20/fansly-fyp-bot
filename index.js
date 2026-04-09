@@ -108,10 +108,26 @@ function downloadBuffer(url) {
 async function saveThumbnail(msg, videoId, researchNum) {
   try {
     let fileId = null;
+
+    // Try every possible thumbnail source
     if (msg.video?.thumb?.file_id) fileId = msg.video.thumb.file_id;
     else if (msg.video?.thumbnail?.file_id) fileId = msg.video.thumbnail.file_id;
     else if (msg.document?.thumb?.file_id) fileId = msg.document.thumb.file_id;
     else if (msg.document?.thumbnail?.file_id) fileId = msg.document.thumbnail.file_id;
+    else if (msg.animation?.thumb?.file_id) fileId = msg.animation.thumb.file_id;
+    else if (msg.animation?.thumbnail?.file_id) fileId = msg.animation.thumbnail.file_id;
+
+    // If still no thumbnail, try to get it by fetching full message info
+    if (!fileId && msg.video?.file_id) {
+      try {
+        const fileInfo = await bot.getFile(msg.video.file_id);
+        console.log('Video file info:', JSON.stringify(fileInfo));
+      } catch(e) {}
+    }
+
+    // Log the full message for debugging
+    console.log('Message video object:', JSON.stringify(msg.video || msg.document || {}));
+
     if (!fileId) return null;
 
     const file = await bot.getFile(fileId);
