@@ -187,6 +187,18 @@ async function autoAssignFanslyNum(videoId, personId) {
   return nextNum;
 }
 
+// ── Deduplication cache to prevent double forwarding ──
+const recentForwards = new Map();
+
+function isDuplicate(videoId, personId) {
+  const key = `${videoId}_${personId}`;
+  const lastTime = recentForwards.get(key);
+  const now = Date.now();
+  if (lastTime && now - lastTime < 10000) return true; // 10 second window
+  recentForwards.set(key, now);
+  return false;
+}
+
 // ── SUPABASE REALTIME: Watch sent_status for toggle changes ──
 async function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
@@ -201,6 +213,13 @@ async function startRealtimeListener() {
     }, async (payload) => {
       try {
         const { video_id, person_id } = payload.new;
+
+        // Deduplicate — ignore if same video+person was just forwarded
+        if (isDuplicate(video_id, person_id)) {
+          console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
+          return;
+        }
+
         console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
 
         const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
