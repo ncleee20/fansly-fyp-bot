@@ -423,10 +423,28 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   if (!msg.reply_to_message) return bot.sendMessage(chatId, '❌ Reply to a video and use /retag #N', { message_thread_id: threadId });
 
   const num = parseInt(match[1].replace('#', ''));
-  const video = await findVideo(String(num));
-  if (!video) return bot.sendMessage(chatId, `❌ Research #${num} not found`, { message_thread_id: threadId });
+  const newName = `Research ${num}`;
 
-  await saveMessageTag(msg.reply_to_message.message_id, num, video.id);
+  // Find the video that currently owns this message
+  const { data: existingTag } = await supabase
+    .from('message_tags')
+    .select('video_id')
+    .eq('message_id', msg.reply_to_message.message_id)
+    .single();
+
+  let video;
+  if (existingTag) {
+    // Update the existing video's name to the new research number
+    await supabase.from('videos').update({ name: newName }).eq('id', existingTag.video_id);
+    await supabase.from('message_tags').update({ research_num: num }).eq('message_id', msg.reply_to_message.message_id);
+    video = { id: existingTag.video_id };
+  } else {
+    // Find by research number
+    video = await findVideo(String(num));
+    if (!video) return bot.sendMessage(chatId, `❌ Research #${num} not found`, { message_thread_id: threadId });
+    await saveMessageTag(msg.reply_to_message.message_id, num, video.id);
+  }
+
   const thumbUrl = await saveThumbnail(msg.reply_to_message, video.id, num);
   const thumbStatus = thumbUrl ? '🖼 Thumbnail updated ✅' : '';
 
