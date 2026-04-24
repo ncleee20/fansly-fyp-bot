@@ -207,6 +207,12 @@ async function startRealtimeListener() {
       try {
         const { video_id, person_id } = payload.new;
 
+        // Only forward if is_sent just changed from false to true (ignore fansly_num updates)
+        if (!payload.old || payload.old.is_sent === true) {
+          console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
+          return;
+        }
+
         if (isDuplicate(video_id, person_id)) {
           console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
           return;
