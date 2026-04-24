@@ -241,6 +241,7 @@ async function startRealtimeListener() {
 
         if (success) {
           console.log(`✅ Forwarded ${video.name} to ${person.name} as Fansly #${fanslyNum}`);
+          bot.sendMessage(GROUP_CHAT_ID, `Fansly #${fanslyNum}`, { message_thread_id: topicId });
           bot.sendMessage(GROUP_CHAT_ID,
             `✅ *Auto-forwarded*\n${video.name} → ${person.name}\n_Assigned as Fansly #${fanslyNum} for ${person.name}_\n\nTo override: go to ${person.name}'s topic and reply to the video with \`/map #N\``,
             { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
