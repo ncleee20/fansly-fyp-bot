@@ -145,12 +145,13 @@ async function saveThumbnail(msg, videoId, researchNum) {
   }
 }
 
+// FIX 1: Check ALL fansly_nums ever assigned, not just currently sent ones
+// This prevents wrong number reassignment when a video is untoggled and retoggled
 async function getNextFanslyNum(personId) {
   const { data } = await supabase
     .from('sent_status')
     .select('fansly_num')
     .eq('person_id', personId)
-    .eq('is_sent', true)
     .not('fansly_num', 'is', null)
     .order('fansly_num', { ascending: false })
     .limit(1);
@@ -418,6 +419,8 @@ bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, results.join('\n'), { message_thread_id: threadId });
 });
 
+// FIX 2: /retag now correctly updates video_id in message_tags
+// so the Realtime listener can find the message when toggling
 bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
@@ -426,27 +429,41 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   const num = parseInt(match[1].replace('#', ''));
   const newName = `Research ${num}`;
 
-  // Find the video that currently owns this message
+  // Find or create the correct video entry for this research number
+  let correctVideo = await findVideo(String(num));
+  if (!correctVideo) {
+    const { data: newVideo } = await supabase.from('videos').insert({ name: newName }).select().single();
+    if (!newVideo) return bot.sendMessage(chatId, `❌ Failed to create Research #${num}`, { message_thread_id: threadId });
+    correctVideo = newVideo;
+    const people = await getPeople();
+    const rows = people.map(p => ({ video_id: newVideo.id, person_id: p.id, is_sent: false }));
+    if (rows.length) await supabase.from('sent_status').insert(rows);
+  }
+
+  // Check if a message_tag already exists for this message
   const { data: existingTag } = await supabase
     .from('message_tags')
     .select('video_id')
     .eq('message_id', msg.reply_to_message.message_id)
     .single();
 
-  let video;
   if (existingTag) {
-    // Update the existing video's name to the new research number
-    await supabase.from('videos').update({ name: newName }).eq('id', existingTag.video_id);
-    await supabase.from('message_tags').update({ research_num: num }).eq('message_id', msg.reply_to_message.message_id);
-    video = { id: existingTag.video_id };
+    // Update both research_num AND video_id to point to the correct video
+    await supabase.from('message_tags').update({
+      research_num: num,
+      video_id: correctVideo.id
+    }).eq('message_id', msg.reply_to_message.message_id);
+
+    // Also rename the video that was previously tagged with this message
+    if (existingTag.video_id !== correctVideo.id) {
+      await supabase.from('videos').update({ name: newName }).eq('id', correctVideo.id);
+    }
   } else {
-    // Find by research number
-    video = await findVideo(String(num));
-    if (!video) return bot.sendMessage(chatId, `❌ Research #${num} not found`, { message_thread_id: threadId });
-    await saveMessageTag(msg.reply_to_message.message_id, num, video.id);
+    // No existing tag — insert a new one
+    await saveMessageTag(msg.reply_to_message.message_id, num, correctVideo.id);
   }
 
-  const thumbUrl = await saveThumbnail(msg.reply_to_message, video.id, num);
+  const thumbUrl = await saveThumbnail(msg.reply_to_message, correctVideo.id, num);
   const thumbStatus = thumbUrl ? '🖼 Thumbnail updated ✅' : '';
 
   bot.sendMessage(chatId, `✅ Retagged as *Research #${num}*\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
