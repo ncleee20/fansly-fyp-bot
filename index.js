@@ -265,6 +265,11 @@ async function startRealtimeListener() {
     });
 }
 
+// ── LOG all messages to help identify chat IDs ──
+bot.on('message', async (msg) => {
+  console.log(`📨 Message received — chat_id: ${msg.chat.id}, thread_id: ${msg.message_thread_id || 'none'}, text: ${msg.text || '[media]'}, chat_title: ${msg.chat.title || 'unknown'}`);
+});
+
 // ── AUTO-TAG videos posted in Research topic ──
 bot.on('message', async (msg) => {
   if (String(msg.chat.id) !== String(GROUP_CHAT_ID)) return;
