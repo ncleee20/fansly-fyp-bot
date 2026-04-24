@@ -269,13 +269,26 @@ bot.on('message', async (msg) => {
 
   try {
     const nextNum = await getNextResearchNumber();
-    const video = await findVideo(String(nextNum));
+    const videoName = `Research ${nextNum}`;
 
+    // Auto-create video in database if it doesn't exist
+    let video = await findVideo(String(nextNum));
     if (!video) {
-      return bot.sendMessage(GROUP_CHAT_ID,
-        `⚠️ Research #${nextNum} not found in database.`,
-        { message_thread_id: TOPICS.research, reply_to_message_id: msg.message_id }
-      );
+      const { data: newVideo } = await supabase.from('videos').insert({ name: videoName }).select().single();
+      if (!newVideo) {
+        return bot.sendMessage(GROUP_CHAT_ID,
+          `⚠️ Failed to create Research #${nextNum} in database.`,
+          { message_thread_id: TOPICS.research, reply_to_message_id: msg.message_id }
+        );
+      }
+      video = newVideo;
+
+      // Create sent_status rows for all models
+      const people = await getPeople();
+      const rows = people.map(p => ({ video_id: newVideo.id, person_id: p.id, is_sent: false }));
+      if (rows.length) await supabase.from('sent_status').insert(rows);
+
+      console.log(`📝 Auto-created video: ${videoName}`);
     }
 
     await saveMessageTag(msg.message_id, nextNum, video.id);
