@@ -8,7 +8,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
 
-// ── Admin restriction: only this user ID can use bot commands ──
+// ── Admin restriction ──
 const ADMIN_TELEGRAM_ID = 7512515977;
 
 const TOPICS = {
@@ -31,7 +31,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('🤖 Fansly FYP Bot is running...');
 
-// ── Auth check ──
 function isAdmin(msg) {
   return msg.from && msg.from.id === ADMIN_TELEGRAM_ID;
 }
@@ -118,7 +117,6 @@ function downloadBuffer(url) {
 async function saveThumbnail(msg, videoId, researchNum) {
   try {
     let fileId = null;
-
     if (msg.video?.thumb?.file_id) fileId = msg.video.thumb.file_id;
     else if (msg.video?.thumbnail?.file_id) fileId = msg.video.thumbnail.file_id;
     else if (msg.document?.thumb?.file_id) fileId = msg.document.thumb.file_id;
@@ -127,14 +125,10 @@ async function saveThumbnail(msg, videoId, researchNum) {
     else if (msg.animation?.thumbnail?.file_id) fileId = msg.animation.thumbnail.file_id;
 
     if (!fileId && msg.video?.file_id) {
-      try {
-        const fileInfo = await bot.getFile(msg.video.file_id);
-        console.log('Video file info:', JSON.stringify(fileInfo));
-      } catch(e) {}
+      try { const fileInfo = await bot.getFile(msg.video.file_id); console.log('Video file info:', JSON.stringify(fileInfo)); } catch(e) {}
     }
 
     console.log('Message video object:', JSON.stringify(msg.video || msg.document || {}));
-
     if (!fileId) return null;
 
     const file = await bot.getFile(fileId);
@@ -181,16 +175,13 @@ async function autoAssignFanslyNum(videoId, personId) {
     .eq('video_id', videoId)
     .eq('person_id', personId)
     .single();
-
   if (data?.fansly_num) return data.fansly_num;
-
   const nextNum = await getNextFanslyNum(personId);
   await setFanslyNum(videoId, personId, nextNum);
   return nextNum;
 }
 
 const recentForwards = new Map();
-
 function isDuplicate(videoId, personId) {
   const key = `${videoId}_${personId}`;
   const lastTime = recentForwards.get(key);
@@ -202,42 +193,27 @@ function isDuplicate(videoId, personId) {
 
 async function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
-
   supabase
     .channel('sent_status_changes')
     .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'sent_status',
-      filter: 'is_sent=eq.true'
+      event: 'UPDATE', schema: 'public', table: 'sent_status', filter: 'is_sent=eq.true'
     }, async (payload) => {
       try {
         const { video_id, person_id } = payload.new;
-
         if (!payload.old || payload.old.is_sent === true) {
           console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
           return;
         }
-
         if (isDuplicate(video_id, person_id)) {
           console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
           return;
         }
-
         console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
-
         const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
         const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
         if (!video || !person) return;
-
         const fanslyNum = await autoAssignFanslyNum(video_id, person_id);
-
-        const { data: tag } = await supabase
-          .from('message_tags')
-          .select('message_id')
-          .eq('video_id', video_id)
-          .single();
-
+        const { data: tag } = await supabase.from('message_tags').select('message_id').eq('video_id', video_id).single();
         if (!tag) {
           bot.sendMessage(GROUP_CHAT_ID,
             `⚠️ *Toggle detected for ${video.name} → ${person.name}*\nBut this video hasn't been uploaded to the Research topic yet!`,
@@ -245,13 +221,10 @@ async function startRealtimeListener() {
           );
           return;
         }
-
         const modelKey = person.name.toLowerCase();
         const topicId = TOPICS[modelKey];
         if (!topicId) return;
-
         const success = await forwardToTopic(tag.message_id, topicId);
-
         if (success) {
           console.log(`✅ Forwarded ${video.name} to ${person.name} as Fansly #${fanslyNum}`);
           bot.sendMessage(GROUP_CHAT_ID, `Fansly #${fanslyNum}`, { message_thread_id: topicId });
@@ -260,13 +233,9 @@ async function startRealtimeListener() {
             { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
           );
         }
-      } catch (e) {
-        console.error('Realtime handler error:', e);
-      }
+      } catch (e) { console.error('Realtime handler error:', e); }
     })
-    .subscribe((status) => {
-      console.log(`Realtime status: ${status}`);
-    });
+    .subscribe((status) => { console.log(`Realtime status: ${status}`); });
 }
 
 // ── Log all messages ──
@@ -286,7 +255,6 @@ bot.on('message', async (msg) => {
   try {
     const nextNum = await getNextResearchNumber();
     const videoName = `Research ${nextNum}`;
-
     let video = await findVideo(String(nextNum));
     if (!video) {
       const { data: newVideo } = await supabase.from('videos').insert({ name: videoName }).select().single();
@@ -297,25 +265,90 @@ bot.on('message', async (msg) => {
         );
       }
       video = newVideo;
-
       const people = await getPeople();
       const rows = people.map(p => ({ video_id: newVideo.id, person_id: p.id, is_sent: false }));
       if (rows.length) await supabase.from('sent_status').insert(rows);
-
       console.log(`📝 Auto-created video: ${videoName}`);
     }
-
     await saveMessageTag(msg.message_id, nextNum, video.id);
     const thumbUrl = await saveThumbnail(msg, video.id, nextNum);
     const thumbStatus = thumbUrl ? '🖼 Thumbnail saved ✅' : '🖼 No thumbnail available';
-
     bot.sendMessage(GROUP_CHAT_ID,
       `📹 *Tagged as Research #${nextNum}*\n${thumbStatus}\n\nToggle in the app to auto-forward to models!`,
       { message_thread_id: TOPICS.research, reply_to_message_id: msg.message_id, parse_mode: 'Markdown' }
     );
-  } catch (e) {
-    console.error('Auto-tag error:', e);
+  } catch (e) { console.error('Auto-tag error:', e); }
+});
+
+// ── /reforward — admin only ──
+bot.onText(/\/reforward (.+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  const threadId = msg.message_thread_id;
+  const modelName = match[1].trim().toLowerCase();
+
+  if (!MODEL_NAMES.includes(modelName)) {
+    return bot.sendMessage(chatId, `❌ Unknown model: ${modelName}`, { message_thread_id: threadId });
   }
+
+  const person = await findPerson(modelName);
+  if (!person) return bot.sendMessage(chatId, `❌ Could not find model: ${modelName}`, { message_thread_id: threadId });
+
+  const topicId = TOPICS[modelName];
+  if (!topicId) return bot.sendMessage(chatId, `❌ No topic found for: ${modelName}`, { message_thread_id: threadId });
+
+  // Get all sent videos for this model ordered by fansly_num
+  const { data: sentData } = await supabase
+    .from('sent_status')
+    .select('*, videos(*)')
+    .eq('person_id', person.id)
+    .eq('is_sent', true)
+    .not('fansly_num', 'is', null)
+    .order('fansly_num', { ascending: true });
+
+  if (!sentData || sentData.length === 0) {
+    return bot.sendMessage(chatId, `📭 No sent videos found for ${person.name}.`, { message_thread_id: threadId });
+  }
+
+  bot.sendMessage(chatId,
+    `🔄 *Re-forwarding ${sentData.length} videos to ${person.name}...*\nThis may take a few minutes, please wait.`,
+    { message_thread_id: threadId, parse_mode: 'Markdown' }
+  );
+
+  let success = 0, failed = 0;
+
+  for (const row of sentData) {
+    try {
+      // Get the message tag for this video
+      const { data: tag } = await supabase
+        .from('message_tags')
+        .select('message_id')
+        .eq('video_id', row.video_id)
+        .single();
+
+      if (!tag) { failed++; continue; }
+
+      const forwarded = await forwardToTopic(tag.message_id, topicId);
+      if (forwarded) {
+        // Send the Fansly # label after forwarding
+        await bot.sendMessage(GROUP_CHAT_ID, `Fansly #${row.fansly_num}`, { message_thread_id: topicId });
+        success++;
+      } else {
+        failed++;
+      }
+
+      // Small delay to avoid hitting Telegram rate limits
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } catch (e) {
+      console.error(`Reforward error for video_id ${row.video_id}:`, e.message);
+      failed++;
+    }
+  }
+
+  bot.sendMessage(chatId,
+    `✅ *Re-forward complete for ${person.name}!*\n\n✅ Forwarded: ${success}\n❌ Failed: ${failed}\n\nAll videos are now back in ${person.name}'s topic with correct Fansly numbers!`,
+    { message_thread_id: threadId, parse_mode: 'Markdown' }
+  );
 });
 
 // ── /map — admin only ──
@@ -323,32 +356,18 @@ bot.onText(/\/map (#?\d+)\s+(#?\d+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
-
   const researchNum = parseInt(match[1].replace('#', ''));
   const fanslyNum = parseInt(match[2].replace('#', ''));
-
   const modelEntry = Object.entries(TOPICS).find(([name, id]) => id === threadId && name !== 'research');
   if (!modelEntry) {
-    return bot.sendMessage(chatId,
-      '❌ This command only works in model topics\nUsage: /map #researchN #fanslyN\nExample: /map #5 #85',
-      { message_thread_id: threadId }
-    );
+    return bot.sendMessage(chatId, '❌ This command only works in model topics\nUsage: /map #researchN #fanslyN\nExample: /map #5 #85', { message_thread_id: threadId });
   }
-
   const modelName = modelEntry[0];
   const person = await findPerson(modelName);
   if (!person) return bot.sendMessage(chatId, `❌ Could not find model: ${modelName}`, { message_thread_id: threadId });
-
   const video = await findVideo(String(researchNum));
-  if (!video) {
-    return bot.sendMessage(chatId,
-      `❌ Research #${researchNum} not found in database`,
-      { message_thread_id: threadId }
-    );
-  }
-
+  if (!video) return bot.sendMessage(chatId, `❌ Research #${researchNum} not found in database`, { message_thread_id: threadId });
   await setFanslyNum(video.id, person.id, fanslyNum);
-
   bot.sendMessage(chatId,
     `✅ *Mapped!*\nResearch #${researchNum} → *Fansly #${fanslyNum}* for ${person.name}\n\nShows as Fansly #${fanslyNum} in ${person.name}'s tab in the app.`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
@@ -362,13 +381,10 @@ bot.onText(/\/send (.+)/i, async (msg, match) => {
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
   if (args.length < 2) return bot.sendMessage(chatId, '❌ Usage: /send #N modelname or /send #N all', { message_thread_id: threadId });
-
   const video = await findVideo(args[0]);
   if (!video) return bot.sendMessage(chatId, `❌ Could not find video: "${args[0]}"`, { message_thread_id: threadId });
-
   const modelNames = args.slice(1).includes('all') ? MODEL_NAMES : args.slice(1);
   let results = [];
-
   for (const modelName of modelNames) {
     if (!MODEL_NAMES.includes(modelName)) { results.push(`❌ Unknown model: ${modelName}`); continue; }
     const person = await findPerson(modelName);
@@ -377,7 +393,6 @@ bot.onText(/\/send (.+)/i, async (msg, match) => {
     const fanslyNum = await autoAssignFanslyNum(video.id, person.id);
     results.push(`✅ ${video.name} → ${person.name} (Fansly #${fanslyNum})`);
   }
-
   bot.sendMessage(chatId, `📤 *Send Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
@@ -387,16 +402,12 @@ bot.onText(/\/forward (.+)/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
-
   const video = await findVideo(args[0]);
   if (!video) return bot.sendMessage(chatId, `❌ Could not find video: "${args[0]}"`, { message_thread_id: threadId });
-
   const { data: tagData } = await supabase.from('message_tags').select('message_id').eq('video_id', video.id).single();
   if (!tagData) return bot.sendMessage(chatId, `❌ No tagged message for ${video.name}.`, { message_thread_id: threadId });
-
   const modelNames = args.slice(1).includes('all') ? MODEL_NAMES : args.slice(1);
   let results = [];
-
   for (const modelName of modelNames) {
     if (!MODEL_NAMES.includes(modelName)) { results.push(`❌ Unknown: ${modelName}`); continue; }
     const topicId = TOPICS[modelName];
@@ -411,7 +422,6 @@ bot.onText(/\/forward (.+)/i, async (msg, match) => {
       results.push(`❌ Failed to forward to ${modelName}`);
     }
   }
-
   bot.sendMessage(chatId, `📤 *Forward Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
@@ -422,20 +432,16 @@ bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
   if (args.length < 2) return bot.sendMessage(chatId, '❌ Usage: /unsend #N modelname', { message_thread_id: threadId });
-
   const video = await findVideo(args[0]);
   if (!video) return bot.sendMessage(chatId, `❌ Could not find: "${args[0]}"`, { message_thread_id: threadId });
-
   const modelNames = args.slice(1).includes('all') ? MODEL_NAMES : args.slice(1);
   let results = [];
-
   for (const modelName of modelNames) {
     const person = await findPerson(modelName);
     if (!person) { results.push(`❌ Unknown: ${modelName}`); continue; }
     await markSent(video.id, person.id, false);
     results.push(`↩️ ${video.name} → ${person.name} unsent`);
   }
-
   bot.sendMessage(chatId, results.join('\n'), { message_thread_id: threadId });
 });
 
@@ -445,10 +451,8 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   if (!msg.reply_to_message) return bot.sendMessage(chatId, '❌ Reply to a video and use /retag #N', { message_thread_id: threadId });
-
   const num = parseInt(match[1].replace('#', ''));
   const newName = `Research ${num}`;
-
   let correctVideo = await findVideo(String(num));
   if (!correctVideo) {
     const { data: newVideo } = await supabase.from('videos').insert({ name: newName }).select().single();
@@ -458,29 +462,17 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
     const rows = people.map(p => ({ video_id: newVideo.id, person_id: p.id, is_sent: false }));
     if (rows.length) await supabase.from('sent_status').insert(rows);
   }
-
-  const { data: existingTag } = await supabase
-    .from('message_tags')
-    .select('video_id')
-    .eq('message_id', msg.reply_to_message.message_id)
-    .single();
-
+  const { data: existingTag } = await supabase.from('message_tags').select('video_id').eq('message_id', msg.reply_to_message.message_id).single();
   if (existingTag) {
-    await supabase.from('message_tags').update({
-      research_num: num,
-      video_id: correctVideo.id
-    }).eq('message_id', msg.reply_to_message.message_id);
-
+    await supabase.from('message_tags').update({ research_num: num, video_id: correctVideo.id }).eq('message_id', msg.reply_to_message.message_id);
     if (existingTag.video_id !== correctVideo.id) {
       await supabase.from('videos').update({ name: newName }).eq('id', correctVideo.id);
     }
   } else {
     await saveMessageTag(msg.reply_to_message.message_id, num, correctVideo.id);
   }
-
   const thumbUrl = await saveThumbnail(msg.reply_to_message, correctVideo.id, num);
   const thumbStatus = thumbUrl ? '🖼 Thumbnail updated ✅' : '';
-
   bot.sendMessage(chatId, `✅ Retagged as *Research #${num}*\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
@@ -491,25 +483,10 @@ bot.onText(/\/list (.+)/i, async (msg, match) => {
   const threadId = msg.message_thread_id;
   const person = await findPerson(match[1].trim().toLowerCase());
   if (!person) return bot.sendMessage(chatId, `❌ Unknown model: ${match[1]}`, { message_thread_id: threadId });
-
-  const { data: sentData } = await supabase
-    .from('sent_status')
-    .select('*, videos(*)')
-    .eq('person_id', person.id)
-    .eq('is_sent', true)
-    .order('fansly_num', { ascending: true });
-
+  const { data: sentData } = await supabase.from('sent_status').select('*, videos(*)').eq('person_id', person.id).eq('is_sent', true).order('fansly_num', { ascending: true });
   if (!sentData?.length) return bot.sendMessage(chatId, `📭 No videos sent to ${person.name} yet.`, { message_thread_id: threadId });
-
-  const list = sentData.map(s => {
-    const fNum = s.fansly_num ? `Fansly #${s.fansly_num}` : 'Fansly # pending';
-    return `• ${fNum} _(${s.videos?.name || 'Unknown'})_`;
-  }).join('\n');
-
-  bot.sendMessage(chatId,
-    `📋 *${person.name}'s Videos* (${sentData.length} total)\n\n${list}`,
-    { message_thread_id: threadId, parse_mode: 'Markdown' }
-  );
+  const list = sentData.map(s => { const fNum = s.fansly_num ? `Fansly #${s.fansly_num}` : 'Fansly # pending'; return `• ${fNum} _(${s.videos?.name || 'Unknown'})_`; }).join('\n');
+  bot.sendMessage(chatId, `📋 *${person.name}'s Videos* (${sentData.length} total)\n\n${list}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
 // ── /status — admin only ──
@@ -542,7 +519,7 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
-    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/map #N\n_Reply to video in model topic to set Fansly #_\nExample: \`/map #79\`\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia, mila, ellie`,
+    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/reforward modelname\n_Re-forward all sent videos back to a model's topic_\nExample: \`/reforward akasha\`\n\n/map #researchN #fanslyN\n_Manually map a research # to a fansly #_\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia, mila, ellie`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 });
