@@ -8,6 +8,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
 
+// ── Admin restriction: only this user ID can use bot commands ──
+const ADMIN_TELEGRAM_ID = 7512515977;
+
 const TOPICS = {
   research: 2,
   josie: 3,
@@ -27,6 +30,11 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('🤖 Fansly FYP Bot is running...');
+
+// ── Auth check ──
+function isAdmin(msg) {
+  return msg.from && msg.from.id === ADMIN_TELEGRAM_ID;
+}
 
 async function getPeople() {
   const { data } = await supabase.from('people').select('*').order('id');
@@ -146,8 +154,6 @@ async function saveThumbnail(msg, videoId, researchNum) {
   }
 }
 
-// FIX 1: Check ALL fansly_nums ever assigned, not just currently sent ones
-// This prevents wrong number reassignment when a video is untoggled and retoggled
 async function getNextFanslyNum(personId) {
   const { data } = await supabase
     .from('sent_status')
@@ -208,7 +214,6 @@ async function startRealtimeListener() {
       try {
         const { video_id, person_id } = payload.new;
 
-        // Only forward if is_sent just changed from false to true (ignore fansly_num updates)
         if (!payload.old || payload.old.is_sent === true) {
           console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
           return;
@@ -264,10 +269,12 @@ async function startRealtimeListener() {
     });
 }
 
+// ── Log all messages ──
 bot.on('message', async (msg) => {
-  console.log(`📨 Message received — chat_id: ${msg.chat.id}, thread_id: ${msg.message_thread_id || 'none'}, text: ${msg.text || '[media]'}, chat_title: ${msg.chat.title || 'unknown'}`);
+  console.log(`📨 Message received — chat_id: ${msg.chat.id}, thread_id: ${msg.message_thread_id || 'none'}, text: ${msg.text || '[media]'}, from_id: ${msg.from?.id || 'unknown'}`);
 });
 
+// ── Auto-tag videos uploaded to Research topic (anyone can upload) ──
 bot.on('message', async (msg) => {
   if (String(msg.chat.id) !== String(GROUP_CHAT_ID)) return;
   if (msg.message_thread_id !== TOPICS.research) return;
@@ -280,7 +287,6 @@ bot.on('message', async (msg) => {
     const nextNum = await getNextResearchNumber();
     const videoName = `Research ${nextNum}`;
 
-    // Auto-create video in database if it doesn't exist
     let video = await findVideo(String(nextNum));
     if (!video) {
       const { data: newVideo } = await supabase.from('videos').insert({ name: videoName }).select().single();
@@ -292,7 +298,6 @@ bot.on('message', async (msg) => {
       }
       video = newVideo;
 
-      // Create sent_status rows for all models
       const people = await getPeople();
       const rows = people.map(p => ({ video_id: newVideo.id, person_id: p.id, is_sent: false }));
       if (rows.length) await supabase.from('sent_status').insert(rows);
@@ -313,7 +318,9 @@ bot.on('message', async (msg) => {
   }
 });
 
+// ── /map — admin only ──
 bot.onText(/\/map (#?\d+)\s+(#?\d+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
 
@@ -348,7 +355,9 @@ bot.onText(/\/map (#?\d+)\s+(#?\d+)/i, async (msg, match) => {
   );
 });
 
+// ── /send — admin only ──
 bot.onText(/\/send (.+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
@@ -372,7 +381,9 @@ bot.onText(/\/send (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `📤 *Send Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
+// ── /forward — admin only ──
 bot.onText(/\/forward (.+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
@@ -404,7 +415,9 @@ bot.onText(/\/forward (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `📤 *Forward Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
+// ── /unsend — admin only ──
 bot.onText(/\/unsend (.+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const args = match[1].trim().toLowerCase().split(/\s+/);
@@ -426,9 +439,9 @@ bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, results.join('\n'), { message_thread_id: threadId });
 });
 
-// FIX 2: /retag now correctly updates video_id in message_tags
-// so the Realtime listener can find the message when toggling
+// ── /retag — admin only ──
 bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   if (!msg.reply_to_message) return bot.sendMessage(chatId, '❌ Reply to a video and use /retag #N', { message_thread_id: threadId });
@@ -436,7 +449,6 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   const num = parseInt(match[1].replace('#', ''));
   const newName = `Research ${num}`;
 
-  // Find or create the correct video entry for this research number
   let correctVideo = await findVideo(String(num));
   if (!correctVideo) {
     const { data: newVideo } = await supabase.from('videos').insert({ name: newName }).select().single();
@@ -447,7 +459,6 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
     if (rows.length) await supabase.from('sent_status').insert(rows);
   }
 
-  // Check if a message_tag already exists for this message
   const { data: existingTag } = await supabase
     .from('message_tags')
     .select('video_id')
@@ -455,18 +466,15 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
     .single();
 
   if (existingTag) {
-    // Update both research_num AND video_id to point to the correct video
     await supabase.from('message_tags').update({
       research_num: num,
       video_id: correctVideo.id
     }).eq('message_id', msg.reply_to_message.message_id);
 
-    // Also rename the video that was previously tagged with this message
     if (existingTag.video_id !== correctVideo.id) {
       await supabase.from('videos').update({ name: newName }).eq('id', correctVideo.id);
     }
   } else {
-    // No existing tag — insert a new one
     await saveMessageTag(msg.reply_to_message.message_id, num, correctVideo.id);
   }
 
@@ -476,13 +484,14 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `✅ Retagged as *Research #${num}*\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
+// ── /list — admin only ──
 bot.onText(/\/list (.+)/i, async (msg, match) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const person = await findPerson(match[1].trim().toLowerCase());
   if (!person) return bot.sendMessage(chatId, `❌ Unknown model: ${match[1]}`, { message_thread_id: threadId });
 
-  const videos = await getSortedVideos();
   const { data: sentData } = await supabase
     .from('sent_status')
     .select('*, videos(*)')
@@ -503,7 +512,9 @@ bot.onText(/\/list (.+)/i, async (msg, match) => {
   );
 });
 
+// ── /status — admin only ──
 bot.onText(/\/status/, async (msg) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   const [videos, people, { data: sentData }] = await Promise.all([
@@ -525,7 +536,9 @@ bot.onText(/\/status/, async (msg) => {
   );
 });
 
+// ── /help — admin only ──
 bot.onText(/\/help/, (msg) => {
+  if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
