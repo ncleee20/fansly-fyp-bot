@@ -35,6 +35,8 @@ function isAdmin(msg) {
   return msg.from && msg.from.id === ADMIN_TELEGRAM_ID;
 }
 
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function getPeople() {
   const { data } = await supabase.from('people').select('*').order('id');
   return data || [];
@@ -297,7 +299,6 @@ bot.onText(/\/reforward (.+)/i, async (msg, match) => {
   const topicId = TOPICS[modelName];
   if (!topicId) return bot.sendMessage(chatId, `❌ No topic found for: ${modelName}`, { message_thread_id: threadId });
 
-  // Get all sent videos for this model ordered by fansly_num
   const { data: sentData } = await supabase
     .from('sent_status')
     .select('*, videos(*)')
@@ -311,7 +312,7 @@ bot.onText(/\/reforward (.+)/i, async (msg, match) => {
   }
 
   bot.sendMessage(chatId,
-    `🔄 *Re-forwarding ${sentData.length} videos to ${person.name}...*\nThis may take a few minutes, please wait.`,
+    `🔄 *Re-forwarding ${sentData.length} videos to ${person.name}...*\nSending one every 7 seconds. This will take about ${Math.ceil(sentData.length * 7 / 60)} minutes.`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 
@@ -319,29 +320,30 @@ bot.onText(/\/reforward (.+)/i, async (msg, match) => {
 
   for (const row of sentData) {
     try {
-      // Get the message tag for this video
       const { data: tag } = await supabase
         .from('message_tags')
         .select('message_id')
         .eq('video_id', row.video_id)
         .single();
 
-      if (!tag) { failed++; continue; }
+      if (!tag) { failed++; await delay(7000); continue; }
 
       const forwarded = await forwardToTopic(tag.message_id, topicId);
       if (forwarded) {
-        // Send the Fansly # label after forwarding
+        // Wait 3 seconds before sending Fansly # to make sure they stay together
+        await delay(3000);
         await bot.sendMessage(GROUP_CHAT_ID, `Fansly #${row.fansly_num}`, { message_thread_id: topicId });
         success++;
+        // Wait another 4 seconds before next video
+        await delay(4000);
       } else {
         failed++;
+        await delay(7000);
       }
-
-      // Small delay to avoid hitting Telegram rate limits
-      await new Promise(resolve => setTimeout(resolve, 500));
     } catch (e) {
       console.error(`Reforward error for video_id ${row.video_id}:`, e.message);
       failed++;
+      await delay(7000);
     }
   }
 
@@ -519,7 +521,7 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
-    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/reforward modelname\n_Re-forward all sent videos back to a model's topic_\nExample: \`/reforward akasha\`\n\n/map #researchN #fanslyN\n_Manually map a research # to a fansly #_\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia, mila, ellie`,
+    `🤖 *Fansly FYP Bot Commands*\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/reforward modelname\n_Re-forward all sent videos back to a model's topic (7s between each)_\nExample: \`/reforward akasha\`\n\n/map #researchN #fanslyN\n_Manually map a research # to a fansly #_\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia, mila, ellie`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 });
