@@ -36,6 +36,11 @@ function isAdmin(msg) {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ── Realtime state ──
+let isRealtimeConnected = false;
+let reconnectTimer = null;
+let isReconnecting = false;
+
 async function getPeople() {
   const { data } = await supabase.from('people').select('*').order('id');
   return data || [];
@@ -192,74 +197,82 @@ function isDuplicate(videoId, personId) {
   return false;
 }
 
-// ── Realtime listener with auto-reconnect ──
-let realtimeChannel = null;
-let isRealtimeConnected = false;
-
-async function startRealtimeListener() {
+// ── Realtime listener with proper single-instance reconnect ──
+function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
 
-  const setupChannel = () => {
-    if (realtimeChannel) {
-      supabase.removeChannel(realtimeChannel);
-    }
+  // Prevent multiple reconnect attempts running at the same time
+  if (isReconnecting) return;
+  isReconnecting = true;
 
-    realtimeChannel = supabase
-      .channel('sent_status_changes')
-      .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'sent_status', filter: 'is_sent=eq.true'
-      }, async (payload) => {
-        try {
-          const { video_id, person_id } = payload.new;
-          if (!payload.old || payload.old.is_sent === true) {
-            console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
-            return;
-          }
-          if (isDuplicate(video_id, person_id)) {
-            console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
-            return;
-          }
-          console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
-          const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
-          const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
-          if (!video || !person) return;
-          const fanslyNum = await autoAssignFanslyNum(video_id, person_id);
-          const { data: tag } = await supabase.from('message_tags').select('message_id').eq('video_id', video_id).single();
-          if (!tag) {
-            bot.sendMessage(GROUP_CHAT_ID,
-              `⚠️ *Toggle detected for ${video.name} → ${person.name}*\nBut this video hasn't been uploaded to the Research topic yet!`,
-              { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
-            );
-            return;
-          }
-          const modelKey = person.name.toLowerCase();
-          const topicId = TOPICS[modelKey];
-          if (!topicId) return;
-          const success = await forwardToTopic(tag.message_id, topicId);
-          if (success) {
-            console.log(`✅ Forwarded ${video.name} to ${person.name} as Fansly #${fanslyNum}`);
-            bot.sendMessage(GROUP_CHAT_ID, `Fansly #${fanslyNum}`, { message_thread_id: topicId });
-            bot.sendMessage(GROUP_CHAT_ID,
-              `✅ *Auto-forwarded*\n${video.name} → ${person.name}\n_Assigned as Fansly #${fanslyNum} for ${person.name}_\n\nTo override: go to ${person.name}'s topic and reply to the video with \`/map #N\``,
-              { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
-            );
-          }
-        } catch (e) { console.error('Realtime handler error:', e); }
-      })
-      .subscribe((status) => {
-        console.log(`Realtime status: ${status}`);
-        if (status === 'SUBSCRIBED') {
-          isRealtimeConnected = true;
-          console.log('✅ Realtime connected');
-        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-          isRealtimeConnected = false;
-          console.log(`⚠️ Realtime disconnected (${status}) — reconnecting in 5 seconds...`);
-          setTimeout(setupChannel, 5000);
+  const channel = supabase
+    .channel(`sent_status_changes_${Date.now()}`)
+    .on('postgres_changes', {
+      event: 'UPDATE', schema: 'public', table: 'sent_status', filter: 'is_sent=eq.true'
+    }, async (payload) => {
+      try {
+        const { video_id, person_id } = payload.new;
+        if (!payload.old || payload.old.is_sent === true) {
+          console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
+          return;
         }
-      });
-  };
+        if (isDuplicate(video_id, person_id)) {
+          console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
+          return;
+        }
+        console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
+        const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
+        const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
+        if (!video || !person) return;
+        const fanslyNum = await autoAssignFanslyNum(video_id, person_id);
+        const { data: tag } = await supabase.from('message_tags').select('message_id').eq('video_id', video_id).single();
+        if (!tag) {
+          bot.sendMessage(GROUP_CHAT_ID,
+            `⚠️ *Toggle detected for ${video.name} → ${person.name}*\nBut this video hasn't been uploaded to the Research topic yet!`,
+            { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
+          );
+          return;
+        }
+        const modelKey = person.name.toLowerCase();
+        const topicId = TOPICS[modelKey];
+        if (!topicId) return;
+        const success = await forwardToTopic(tag.message_id, topicId);
+        if (success) {
+          console.log(`✅ Forwarded ${video.name} to ${person.name} as Fansly #${fanslyNum}`);
+          bot.sendMessage(GROUP_CHAT_ID, `Fansly #${fanslyNum}`, { message_thread_id: topicId });
+          bot.sendMessage(GROUP_CHAT_ID,
+            `✅ *Auto-forwarded*\n${video.name} → ${person.name}\n_Assigned as Fansly #${fanslyNum} for ${person.name}_\n\nTo override: go to ${person.name}'s topic and reply to the video with \`/map #N\``,
+            { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
+          );
+        }
+      } catch (e) { console.error('Realtime handler error:', e); }
+    })
+    .subscribe((status) => {
+      console.log(`Realtime status: ${status}`);
+      isReconnecting = false;
 
-  setupChannel();
+      if (status === 'SUBSCRIBED') {
+        isRealtimeConnected = true;
+        console.log('✅ Realtime connected');
+        // Clear any pending reconnect timer
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        isRealtimeConnected = false;
+        console.log(`⚠️ Realtime disconnected (${status})`);
+        // Only schedule ONE reconnect attempt
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            console.log('🔄 Attempting to reconnect Realtime...');
+            supabase.removeChannel(channel);
+            startRealtimeListener();
+          }, 5000);
+        }
+      }
+    });
 }
 
 // ── Log all messages ──
@@ -304,7 +317,7 @@ bot.on('message', async (msg) => {
   } catch (e) { console.error('Auto-tag error:', e); }
 });
 
-// ── /ping — check if bot and realtime are online ──
+// ── /ping ──
 bot.onText(/\/ping/, (msg) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -316,7 +329,7 @@ bot.onText(/\/ping/, (msg) => {
   );
 });
 
-// ── /reforward — admin only ──
+// ── /reforward ──
 bot.onText(/\/reforward (.+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -385,7 +398,7 @@ bot.onText(/\/reforward (.+)/i, async (msg, match) => {
   );
 });
 
-// ── /map — admin only ──
+// ── /map ──
 bot.onText(/\/map (#?\d+)\s+(#?\d+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -408,7 +421,7 @@ bot.onText(/\/map (#?\d+)\s+(#?\d+)/i, async (msg, match) => {
   );
 });
 
-// ── /send — admin only ──
+// ── /send ──
 bot.onText(/\/send (.+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -430,7 +443,7 @@ bot.onText(/\/send (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `📤 *Send Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
-// ── /forward — admin only ──
+// ── /forward ──
 bot.onText(/\/forward (.+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -459,7 +472,7 @@ bot.onText(/\/forward (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `📤 *Forward Report*\n\n${results.join('\n')}\n\n_App updated automatically_`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
-// ── /unsend — admin only ──
+// ── /unsend ──
 bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -479,7 +492,7 @@ bot.onText(/\/unsend (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, results.join('\n'), { message_thread_id: threadId });
 });
 
-// ── /retag — admin only ──
+// ── /retag ──
 bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -510,7 +523,7 @@ bot.onText(/\/retag (#?\d+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `✅ Retagged as *Research #${num}*\n${thumbStatus}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
-// ── /list — admin only ──
+// ── /list ──
 bot.onText(/\/list (.+)/i, async (msg, match) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -523,7 +536,7 @@ bot.onText(/\/list (.+)/i, async (msg, match) => {
   bot.sendMessage(chatId, `📋 *${person.name}'s Videos* (${sentData.length} total)\n\n${list}`, { message_thread_id: threadId, parse_mode: 'Markdown' });
 });
 
-// ── /status — admin only ──
+// ── /status ──
 bot.onText(/\/status/, async (msg) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -547,7 +560,7 @@ bot.onText(/\/status/, async (msg) => {
   );
 });
 
-// ── /help — admin only ──
+// ── /help ──
 bot.onText(/\/help/, (msg) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
@@ -558,8 +571,4 @@ bot.onText(/\/help/, (msg) => {
   );
 });
 
-startRealtimeListener().then(() => {
-  console.log('✅ Realtime listener started');
-}).catch(e => {
-  console.error('❌ Realtime listener failed:', e);
-});
+startRealtimeListener();
