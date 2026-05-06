@@ -17,13 +17,13 @@ const TOPICS = {
   lola: 5,
   akasha: 6,
   myla: 7,
-  grace: 8,
   mia: 9,
-  mila: 10,
-  ellie: 1556
+  ellie: 1556,
+  bella: 3497,
+  mora: 3499
 };
 
-const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'grace', 'mia', 'mila', 'ellie'];
+const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'mia', 'ellie', 'bella', 'mora'];
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -201,7 +201,6 @@ function isDuplicate(videoId, personId) {
 function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
 
-  // Prevent multiple reconnect attempts running at the same time
   if (isReconnecting) return;
   isReconnecting = true;
 
@@ -254,7 +253,6 @@ function startRealtimeListener() {
       if (status === 'SUBSCRIBED') {
         isRealtimeConnected = true;
         console.log('✅ Realtime connected');
-        // Clear any pending reconnect timer
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
           reconnectTimer = null;
@@ -262,7 +260,6 @@ function startRealtimeListener() {
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
         isRealtimeConnected = false;
         console.log(`⚠️ Realtime disconnected (${status})`);
-        // Only schedule ONE reconnect attempt
         if (!reconnectTimer) {
           reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
@@ -566,7 +563,7 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const threadId = msg.message_thread_id;
   bot.sendMessage(chatId,
-    `🤖 *Fansly FYP Bot Commands*\n\n/ping\n_Check if bot and realtime are online before toggling_\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/reforward modelname\n_Re-forward all sent videos back to a model's topic_\n\n/map #researchN #fanslyN\n_Manually map a research # to a fansly #_\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, grace, mia, mila, ellie`,
+    `🤖 *Fansly FYP Bot Commands*\n\n/ping\n_Check if bot and realtime are online before toggling_\n\n*Auto-tagging:*\nUpload video to Research topic → bot tags it\n\n*Auto-forwarding:*\nToggle in web app → bot forwards + assigns Fansly #\n\n/reforward modelname\n_Re-forward all sent videos back to a model's topic_\n\n/map #researchN #fanslyN\n_Manually map a research # to a fansly #_\n\n/forward #N model1 ... | all\n_Manually forward video_\n\n/send #N model1 ... | all\n_Mark as sent without forwarding_\n\n/unsend #N model1 ... | all\n_Mark as unsent_\n\n/retag #N\n_Reply to video to reassign Research #_\n\n/list modelname\n_Videos sent to a model with Fansly numbers_\n\n/status\n_Overall tracker stats_\n\nModels: lola, josie, emma, akasha, myla, mia, ellie, bella, mora`,
     { message_thread_id: threadId, parse_mode: 'Markdown' }
   );
 });
