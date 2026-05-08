@@ -19,10 +19,11 @@ const TOPICS = {
   myla: 7,
   mia: 9,
   bella: 3497,
-  mora: 3499
+  mora: 3499,
+  zoe: 3639
 };
 
-const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'mia', 'bella', 'mora'];
+const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'mia', 'bella', 'mora', 'zoe'];
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
