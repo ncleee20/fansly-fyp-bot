@@ -24,48 +24,8 @@ const TOPICS = {
 
 const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'mia', 'bella', 'mora'];
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-// ── Single instance lock ──
-// Uses Supabase to store the current instance ID
-// If another instance is already running, this one shuts down
-const INSTANCE_ID = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-const LOCK_KEY = 'bot_instance_lock';
-
-async function acquireLock() {
-  try {
-    // Write our instance ID to the lock
-    await supabase.from('bot_lock').upsert({ id: 1, instance_id: INSTANCE_ID, updated_at: new Date().toISOString() });
-    
-    // Wait 3 seconds then check if we still own the lock
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const { data } = await supabase.from('bot_lock').select('instance_id').eq('id', 1).single();
-    
-    if (data?.instance_id !== INSTANCE_ID) {
-      console.log('⚠️ Another instance has taken the lock. Shutting down this instance...');
-      process.exit(0);
-    }
-    
-    console.log(`✅ Lock acquired — instance ${INSTANCE_ID}`);
-    return true;
-  } catch (e) {
-    // If bot_lock table doesn't exist, just proceed without lock
-    console.log('⚠️ Lock table not found — proceeding without lock');
-    return true;
-  }
-}
-
-// Refresh lock every 30 seconds to keep ownership
-function startLockRefresh() {
-  setInterval(async () => {
-    try {
-      await supabase.from('bot_lock').upsert({ id: 1, instance_id: INSTANCE_ID, updated_at: new Date().toISOString() });
-    } catch(e) {}
-  }, 30000);
-}
-
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('🤖 Fansly FYP Bot is running...');
 
@@ -75,10 +35,7 @@ function isAdmin(msg) {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// ── Realtime state ──
 let isRealtimeConnected = false;
-let reconnectTimer = null;
-let isReconnecting = false;
 
 async function getPeople() {
   const { data } = await supabase.from('people').select('*').order('id');
@@ -236,34 +193,45 @@ function isDuplicate(videoId, personId) {
   return false;
 }
 
-// ── Realtime listener with proper single-instance reconnect ──
-function startRealtimeListener() {
+// ── Simple Realtime listener ──
+async function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
 
-  if (isReconnecting) return;
-  isReconnecting = true;
-
-  const channel = supabase
-    .channel(`sent_status_changes_${Date.now()}`)
+  supabase
+    .channel('sent_status_changes')
     .on('postgres_changes', {
-      event: 'UPDATE', schema: 'public', table: 'sent_status', filter: 'is_sent=eq.true'
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'sent_status',
+      filter: 'is_sent=eq.true'
     }, async (payload) => {
       try {
         const { video_id, person_id } = payload.new;
+
         if (!payload.old || payload.old.is_sent === true) {
           console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
           return;
         }
+
         if (isDuplicate(video_id, person_id)) {
           console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
           return;
         }
+
         console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
+
         const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
         const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
         if (!video || !person) return;
+
         const fanslyNum = await autoAssignFanslyNum(video_id, person_id);
-        const { data: tag } = await supabase.from('message_tags').select('message_id').eq('video_id', video_id).single();
+
+        const { data: tag } = await supabase
+          .from('message_tags')
+          .select('message_id')
+          .eq('video_id', video_id)
+          .single();
+
         if (!tag) {
           bot.sendMessage(GROUP_CHAT_ID,
             `⚠️ *Toggle detected for ${video.name} → ${person.name}*\nBut this video hasn't been uploaded to the Research topic yet!`,
@@ -271,10 +239,13 @@ function startRealtimeListener() {
           );
           return;
         }
+
         const modelKey = person.name.toLowerCase();
         const topicId = TOPICS[modelKey];
         if (!topicId) return;
+
         const success = await forwardToTopic(tag.message_id, topicId);
+
         if (success) {
           console.log(`✅ Forwarded ${video.name} to ${person.name} as Fansly #${fanslyNum}`);
           bot.sendMessage(GROUP_CHAT_ID, `Fansly #${fanslyNum}`, { message_thread_id: topicId });
@@ -283,30 +254,18 @@ function startRealtimeListener() {
             { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
           );
         }
-      } catch (e) { console.error('Realtime handler error:', e); }
+      } catch (e) {
+        console.error('Realtime handler error:', e);
+      }
     })
     .subscribe((status) => {
       console.log(`Realtime status: ${status}`);
-      isReconnecting = false;
-
       if (status === 'SUBSCRIBED') {
         isRealtimeConnected = true;
         console.log('✅ Realtime connected');
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
         isRealtimeConnected = false;
         console.log(`⚠️ Realtime disconnected (${status})`);
-        if (!reconnectTimer) {
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            console.log('🔄 Attempting to reconnect Realtime...');
-            supabase.removeChannel(channel);
-            startRealtimeListener();
-          }, 5000);
-        }
       }
     });
 }
@@ -607,12 +566,8 @@ bot.onText(/\/help/, (msg) => {
   );
 });
 
-// ── Boot with lock ──
-async function boot() {
-  console.log(`🔐 Acquiring instance lock...`);
-  await acquireLock();
-  startLockRefresh();
-  startRealtimeListener();
-}
-
-boot();
+startRealtimeListener().then(() => {
+  console.log('✅ Realtime listener started');
+}).catch(e => {
+  console.error('❌ Realtime listener failed:', e);
+});
