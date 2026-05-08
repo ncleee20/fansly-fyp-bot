@@ -210,13 +210,14 @@ async function startRealtimeListener() {
   supabase
     .channel('sent_status_changes')
     .on('postgres_changes', {
-      event: 'UPDATE',
+      event: '*',
       schema: 'public',
       table: 'sent_status'
-      // No filter — we listen to ALL updates so we can clear cache on untoggle
     }, async (payload) => {
       try {
-        const { video_id, person_id, is_sent } = payload.new;
+        const record = payload.new || payload.old;
+        if (!record) return;
+        const { video_id, person_id, is_sent } = record;
 
         // If untoggled — clear the dedup cache so next toggle always fires
         if (!is_sent) {
