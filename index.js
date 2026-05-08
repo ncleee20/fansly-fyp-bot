@@ -24,8 +24,48 @@ const TOPICS = {
 
 const MODEL_NAMES = ['lola', 'josie', 'emma', 'akasha', 'myla', 'mia', 'bella', 'mora'];
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ── Single instance lock ──
+// Uses Supabase to store the current instance ID
+// If another instance is already running, this one shuts down
+const INSTANCE_ID = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+const LOCK_KEY = 'bot_instance_lock';
+
+async function acquireLock() {
+  try {
+    // Write our instance ID to the lock
+    await supabase.from('bot_lock').upsert({ id: 1, instance_id: INSTANCE_ID, updated_at: new Date().toISOString() });
+    
+    // Wait 3 seconds then check if we still own the lock
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    const { data } = await supabase.from('bot_lock').select('instance_id').eq('id', 1).single();
+    
+    if (data?.instance_id !== INSTANCE_ID) {
+      console.log('⚠️ Another instance has taken the lock. Shutting down this instance...');
+      process.exit(0);
+    }
+    
+    console.log(`✅ Lock acquired — instance ${INSTANCE_ID}`);
+    return true;
+  } catch (e) {
+    // If bot_lock table doesn't exist, just proceed without lock
+    console.log('⚠️ Lock table not found — proceeding without lock');
+    return true;
+  }
+}
+
+// Refresh lock every 30 seconds to keep ownership
+function startLockRefresh() {
+  setInterval(async () => {
+    try {
+      await supabase.from('bot_lock').upsert({ id: 1, instance_id: INSTANCE_ID, updated_at: new Date().toISOString() });
+    } catch(e) {}
+  }, 30000);
+}
+
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 console.log('🤖 Fansly FYP Bot is running...');
 
@@ -567,4 +607,12 @@ bot.onText(/\/help/, (msg) => {
   );
 });
 
-startRealtimeListener();
+// ── Boot with lock ──
+async function boot() {
+  console.log(`🔐 Acquiring instance lock...`);
+  await acquireLock();
+  startLockRefresh();
+  startRealtimeListener();
+}
+
+boot();
