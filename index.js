@@ -183,7 +183,10 @@ async function autoAssignFanslyNum(videoId, personId) {
   return nextNum;
 }
 
+// ── Dedup cache — tracks recently forwarded toggles ──
+// Key: `${videoId}_${personId}`, Value: timestamp
 const recentForwards = new Map();
+
 function isDuplicate(videoId, personId) {
   const key = `${videoId}_${personId}`;
   const lastTime = recentForwards.get(key);
@@ -193,7 +196,14 @@ function isDuplicate(videoId, personId) {
   return false;
 }
 
-// ── Simple Realtime listener ──
+// Call this when a toggle is turned OFF so re-toggling always works
+function clearDedupCache(videoId, personId) {
+  const key = `${videoId}_${personId}`;
+  recentForwards.delete(key);
+  console.log(`🗑 Dedup cache cleared for video_id=${videoId}, person_id=${personId}`);
+}
+
+// ── Realtime listener ──
 async function startRealtimeListener() {
   console.log('👂 Starting Supabase Realtime listener...');
 
@@ -202,27 +212,33 @@ async function startRealtimeListener() {
     .on('postgres_changes', {
       event: 'UPDATE',
       schema: 'public',
-      table: 'sent_status',
-      filter: 'is_sent=eq.true'
+      table: 'sent_status'
+      // No filter — we listen to ALL updates so we can clear cache on untoggle
     }, async (payload) => {
       try {
-        const { video_id, person_id } = payload.new;
+        const { video_id, person_id, is_sent } = payload.new;
 
-        if (!payload.old || payload.old.is_sent === true) {
-          console.log(`⏭ Skipped — not a fresh toggle: video_id=${video_id}, person_id=${person_id}`);
+        // If untoggled — clear the dedup cache so next toggle always fires
+        if (!is_sent) {
+          clearDedupCache(video_id, person_id);
+          console.log(`↩️ Untoggle detected: video_id=${video_id}, person_id=${person_id} — cache cleared`);
           return;
         }
 
+        // is_sent === true from here down
         if (isDuplicate(video_id, person_id)) {
           console.log(`⏭ Duplicate event skipped: video_id=${video_id}, person_id=${person_id}`);
           return;
         }
 
-        console.log(`🔔 Toggle detected: video_id=${video_id}, person_id=${person_id}`);
+        console.log(`🔔 Toggle ON detected: video_id=${video_id}, person_id=${person_id}`);
 
         const { data: video } = await supabase.from('videos').select('*').eq('id', video_id).single();
         const { data: person } = await supabase.from('people').select('*').eq('id', person_id).single();
-        if (!video || !person) return;
+        if (!video || !person) {
+          console.log(`⚠️ Could not find video or person: video_id=${video_id}, person_id=${person_id}`);
+          return;
+        }
 
         const fanslyNum = await autoAssignFanslyNum(video_id, person_id);
 
@@ -242,7 +258,10 @@ async function startRealtimeListener() {
 
         const modelKey = person.name.toLowerCase();
         const topicId = TOPICS[modelKey];
-        if (!topicId) return;
+        if (!topicId) {
+          console.log(`⚠️ No topic ID found for model: ${modelKey}`);
+          return;
+        }
 
         const success = await forwardToTopic(tag.message_id, topicId);
 
@@ -253,6 +272,8 @@ async function startRealtimeListener() {
             `✅ *Auto-forwarded*\n${video.name} → ${person.name}\n_Assigned as Fansly #${fanslyNum} for ${person.name}_\n\nTo override: go to ${person.name}'s topic and reply to the video with \`/map #N\``,
             { message_thread_id: TOPICS.research, parse_mode: 'Markdown' }
           );
+        } else {
+          console.log(`❌ Forward failed for ${video.name} → ${person.name}`);
         }
       } catch (e) {
         console.error('Realtime handler error:', e);
